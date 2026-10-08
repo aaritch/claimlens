@@ -1,0 +1,19 @@
+{
+  "_note": "PLACEHOLDER RATES in USD. LLM rates are per 1,000 tokens (keys under 'models' are substrings matched against the model ID; 'default' is the fallback). OCR rates are per page. Replace ALL of these with current numbers from the AWS pricing pages before trusting any cost report. The 'oracle' OCR rate is a stand-in priced like Textract so cascade/escalation costs are visible in offline demos.",
+  "models": {},
+  "default": {
+    "input_per_1k": 0.003,
+    "output_per_1k": 0.015
+  },
+  "ocr": {
+    "textract": {
+      "per_page": 0.0015
+    },
+    "tesseract": {
+      "per_page": 0.0
+    },
+    "oracle": {
+      "per_page": 0.0015
+    }
+  }
+}

@@ -1,0 +1,24 @@
+# Local development dependencies. NOTE: written but NOT tested in the environment that built this project
+# (no Docker there). The same services were verified natively: PostgreSQL 16, Redis, and moto for DynamoDB.
+#
+#   docker compose up -d
+#   export CLAIMLENS_DATABASE_URL=postgresql+psycopg://claimlens:claimlens@localhost:5432/claimlens
+#   export CLAIMLENS_REDIS_URL=redis://localhost:6379/0
+#   export CLAIMLENS_IDEMPOTENCY=dynamodb CLAIMLENS_DYNAMODB_ENDPOINT=http://localhost:8000
+#   export AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_DEFAULT_REGION=us-east-1
+#   python -m claimlens db-init
+services:
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_USER: claimlens, POSTGRES_PASSWORD: claimlens, POSTGRES_DB: claimlens}
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+  dynamodb:
+    image: amazon/dynamodb-local
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports: ["8000:8000"]
+volumes:
+  pgdata: {}
