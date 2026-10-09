@@ -12,23 +12,33 @@ Phase 5 replaces "upload bytes to the API" with "presigned S3 upload + queue + w
 from __future__ import annotations
 
 import logging
+import uuid
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import text
 
 from claimlens.api.auth import Actor, Authenticator
-from claimlens.api.schemas import DocumentList, DocumentOut, IngestResponse, ReviewIn
+from claimlens.api.schemas import (DocumentList, DocumentOut, IngestResponse, ReviewIn, UploadRequest, UploadStatus,
+                                   UploadTicket)
 from claimlens.config import Settings
-from claimlens.service import ProcessingService, TransientProcessingError, UnsupportedUpload
+from claimlens.service import (ALLOWED_EXTENSIONS, ProcessingService, TransientProcessingError, UnsupportedUpload,
+                               safe_basename)
 from claimlens.storage import repository as repo
 
 log = logging.getLogger(__name__)
+def _default_s3():
+    import boto3
+    from botocore.config import Config
+    return boto3.client("s3", config=Config(signature_version="s3v4"))
+
+
 STATUSES = {"validated", "needs_review", "rejected", "needs_ocr", "error"}
 
 
 def create_app(service: ProcessingService, session_factory, settings: Settings, authenticator: Authenticator,
-               enable_docs: bool = True) -> FastAPI:
+               enable_docs: bool = True, s3_client=None) -> FastAPI:
     app = FastAPI(title="ClaimLens API", version="0.4.0",
                   docs_url="/docs" if enable_docs else None, redoc_url=None,
                   openapi_url="/openapi.json" if enable_docs else None)
@@ -70,33 +80,69 @@ def create_app(service: ProcessingService, session_factory, settings: Settings, 
                 raise HTTPException(404, "document not found")
             return DocumentOut(**repo.document_to_dict(doc))
 
-    # ---- upload ----
-    @app.post("/documents", response_model=IngestResponse, status_code=201)
-    def upload(response: Response, file: UploadFile = File(...), content_length: Optional[int] = Header(default=None),
-               actor: Actor = Depends(actor_for("uploader"))):
-        limit = settings.max_upload_bytes
-        if content_length is not None and content_length > limit + 4096:  # small allowance for multipart framing
-            raise HTTPException(413, f"file larger than {limit} bytes")
-        data = file.file.read(limit + 1)
-        if len(data) > limit:
-            raise HTTPException(413, f"file larger than {limit} bytes")
-        if not data:
-            raise HTTPException(400, "empty file")
-        try:
-            outcome = service.ingest(data, file.filename or "upload", actor.name)
-        except UnsupportedUpload as exc:
-            raise HTTPException(415, str(exc))
-        except TransientProcessingError as exc:
-            raise HTTPException(503, "temporary processing failure, please retry",
-                                headers={"Retry-After": str(exc.retry_after)})
-        if outcome.outcome == "in_progress":
-            response.status_code = 202
-            response.headers["Retry-After"] = "5"
-            return IngestResponse(outcome="in_progress", detail="this document is being processed by another request")
-        if outcome.outcome == "duplicate":
-            response.status_code = 200
-        response.headers["Location"] = f"/documents/{outcome.document_id}"
-        return IngestResponse(outcome=outcome.outcome, document=load(outcome.document_id))
+    # ---- upload: asynchronous (production) ----
+    @app.post("/uploads", response_model=UploadTicket, status_code=201)
+    def request_upload(body: UploadRequest, actor: Actor = Depends(actor_for("uploader"))):
+        """Step 1 of 2: get a short-lived, size-limited ticket to upload straight to S3. The API never touches the bytes."""
+        if not settings.documents_bucket:
+            raise HTTPException(503, "uploads are not configured on this server")
+        name = safe_basename(body.filename)
+        if Path(name).suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise HTTPException(415, f"unsupported file type '{Path(name).suffix.lower()}'")
+        upload_id = str(uuid.uuid4())
+        key = f"{settings.upload_prefix}{upload_id}/{name}"
+        client = s3_client or _default_s3()
+        post = client.generate_presigned_post(
+            Bucket=settings.documents_bucket, Key=key,
+            Conditions=[["content-length-range", 1, settings.max_upload_bytes]],  # S3 itself rejects oversize/empty files
+            ExpiresIn=settings.upload_url_ttl_seconds)
+        with session_factory() as s:
+            repo.create_upload(s, upload_id, key, name, actor.name)
+            repo.audit(s, actor.name, "upload_requested", None, {"upload_id": upload_id})
+            s.commit()
+        return UploadTicket(upload_id=upload_id, url=post["url"], fields=post["fields"],
+                            expires_in=settings.upload_url_ttl_seconds, max_bytes=settings.max_upload_bytes)
+
+    @app.get("/uploads/{upload_id}", response_model=UploadStatus)
+    def upload_status(upload_id: str, actor: Actor = Depends(actor_for("uploader"))):
+        """Step 2 of 2: poll until state is processed / duplicate / failed, then GET /documents/{document_id}."""
+        with session_factory() as s:
+            row = repo.get_upload(s, upload_id)
+            # Uploaders see only their own uploads; reviewers and admins see all. Others get 404 (not 403) so IDs can't be probed.
+            if row is None or (row.requested_by != actor.name and not actor.allows("reviewer")):
+                raise HTTPException(404, "upload not found")
+            return UploadStatus(upload_id=row.id, state=row.state, document_id=row.document_id, error=row.error)
+
+    # ---- upload: synchronous (local demos and tests; switch off in production) ----
+    if settings.sync_upload_enabled:
+        # ---- upload ----
+        @app.post("/documents", response_model=IngestResponse, status_code=201)
+        def upload(response: Response, file: UploadFile = File(...), content_length: Optional[int] = Header(default=None),
+                   actor: Actor = Depends(actor_for("uploader"))):
+            limit = settings.max_upload_bytes
+            if content_length is not None and content_length > limit + 4096:  # small allowance for multipart framing
+                raise HTTPException(413, f"file larger than {limit} bytes")
+            data = file.file.read(limit + 1)
+            if len(data) > limit:
+                raise HTTPException(413, f"file larger than {limit} bytes")
+            if not data:
+                raise HTTPException(400, "empty file")
+            try:
+                outcome = service.ingest(data, file.filename or "upload", actor.name)
+            except UnsupportedUpload as exc:
+                raise HTTPException(415, str(exc))
+            except TransientProcessingError as exc:
+                raise HTTPException(503, "temporary processing failure, please retry",
+                                    headers={"Retry-After": str(exc.retry_after)})
+            if outcome.outcome == "in_progress":
+                response.status_code = 202
+                response.headers["Retry-After"] = "5"
+                return IngestResponse(outcome="in_progress", detail="this document is being processed by another request")
+            if outcome.outcome == "duplicate":
+                response.status_code = 200
+            response.headers["Location"] = f"/documents/{outcome.document_id}"
+            return IngestResponse(outcome=outcome.outcome, document=load(outcome.document_id))
+
 
     # ---- reads (every read is audited: who looked at what) ----
     @app.get("/documents/{document_id}", response_model=DocumentOut)

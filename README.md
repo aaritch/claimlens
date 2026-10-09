@@ -1,4 +1,4 @@
-# ClaimLens (Phases 0-4): extraction + evaluation + OCR + storage + API
+# ClaimLens (Phases 0-5): extraction + evaluation + OCR + storage + API + AWS deployment
 
 Parses messy healthcare-style documents (PDF, DOCX, EML with attachments, TXT),
 classifies them and extracts structured fields with **AWS Bedrock** (forced tool
@@ -11,8 +11,8 @@ use + Pydantic), then double-checks the result with **deterministic rules**.
 ```bash
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-pytest                              # should be all green, no AWS needed
+pip install -r requirements-dev.txt   # runtime + test tools (production image uses requirements.txt only)
+pytest                                # should be all green, no AWS needed
 ```
 
 ## 2. Try it with NO AWS account (mock mode)
@@ -328,3 +328,90 @@ Permanent failures are recorded once (status `error`) so a bad file is not retri
 - Auth is static bearer tokens (hash-compared in constant time). Real deployments should use Cognito/OIDC (Phase 5-6). There is no rate limiting yet.
 - `POST /documents` processes synchronously and holds the request open. Phase 5 turns this into presigned S3 upload + queue + worker; the resource shapes stay the same.
 - Running the Postgres tests: `export CLAIMLENS_TEST_PG_URL=postgresql+psycopg://user:pass@localhost/dbname` (the tests drop and recreate tables in that database, so use a throwaway one).
+
+---
+
+# Phase 5: deploying to AWS (Terraform + Fargate worker)
+
+> **Analogy: moving the records department into a secured building.** The building has no street door
+> (no internet gateway); everything arrives through badge-controlled service hatches (VPC endpoints). Uploads go
+> to a locked mailbox (S3) that rings a bell (EventBridge) and drops a ticket on a rail (SQS). Clerks (Fargate workers)
+> take tickets, keep telling the rail "still working" (heartbeat), and tickets that keep failing go to a
+> problem pile (dead-letter queue) with an alarm on it.
+
+```
+browser --POST /uploads--> API (internal ALB) --> short-lived, size-limited presigned S3 POST
+browser --file--> S3 (KMS, private) --event--> EventBridge (prefix filter) --> SQS --> Fargate worker
+                                                          |                        |-- Textract / Tesseract (OCR)
+                                                    DLQ + alarms                   |-- Bedrock (classify + extract)
+                                                                                   |-- DynamoDB lease, Redis fast path
+browser --GET /uploads/{id}--> processed | duplicate | failed  --> GET /documents/{id}    +-- Postgres (RDS)
+```
+
+## What is in the box
+| Path | What |
+|---|---|
+| `claimlens/worker.py` | SQS consumer: concurrency, visibility **heartbeat**, backoff tied to receive count, graceful SIGTERM, no keys in logs |
+| `Dockerfile`, `.dockerignore` | one image, non-root, read-only-friendly; command picks `worker` or `serve` |
+| `infra/terraform/` | the whole stack (flat root module, one file per concern, 100+ resources) |
+| `scripts/deploy.sh` | `bootstrap` -> `release` (git-SHA tag) -> `migrate`; refuses to ship uncommitted code |
+| `tests/infra/` | 44 policy-as-code tests over the parsed HCL |
+| `tests/test_worker.py` | 45 worker tests incl. real boto3 S3+SQS (moto) and a poison message reaching the DLQ |
+
+## Design decisions worth being able to defend
+- **No internet path at all.** No IGW, no NAT. Nine interface endpoints (ECR x2, Logs, SQS, KMS, STS, Secrets Manager, Bedrock, Textract) plus S3/DynamoDB gateway endpoints. The Gemini draft created only a Bedrock endpoint, so its Lambda could not have reached S3, DynamoDB, Textract or KMS.
+- **No `0.0.0.0/0` anywhere.** Security-group egress is allow-listed by destination (endpoint SG, S3/DynamoDB prefix lists, DB SG, Redis SG). A test fails the build if one appears.
+- **Fargate worker, not Lambda.** OCR jobs exceed Lambda's 15-minute cap and Tesseract is CPU-heavy; the heartbeat keeps long jobs invisible to other workers.
+- **Queue-depth autoscaling, not CPU.** Workers mostly wait on Bedrock/Textract, so CPU stays low while a backlog grows. Scale-out when waiting messages >= `scale_out_backlog`; scale-in only when waiting **plus in-flight** has been 0 for 15 minutes.
+- **Worker retry policy.** Transient failures requeue with 30s/60s/120s/... backoff based on SQS's delivery count; after `max_receive_count` deliveries SQS itself moves the message to the DLQ. Things that can never succeed (malformed event, missing object, wrong type, too big) are deleted/quarantined immediately.
+- **Three IAM roles, none with wildcards.** Execution role (pull image, logs, inject secrets), worker task role, API task role. The API role cannot read documents or call a model; the worker may delete only its temporary OCR copies, never originals. The only `Resource: "*"` are `ecr:GetAuthorizationToken` and Textract, which AWS cannot scope; a test enforces that allow-list.
+- **Secrets never touch code or tfvars.** RDS manages its own master password (`manage_master_user_password`); ECS injects it by reference; the API-token secret is created empty and filled out-of-band.
+- **Immutable image tags.** `:latest` is impossible by design; every release is a git SHA; the circuit breaker rolls back a bad image.
+- **Pinned AZs.** Zones are an explicit variable: auto-discovery could silently reshuffle subnets (and so the database) if AWS changes the zone list. (A scanner check flagged this, and it was right.)
+- **Two-phase rollout.** The ECR repo must exist before an image can be pushed and services need an image, so `enable_services` starts false.
+
+## Deploy
+```bash
+cp infra/terraform/envs/dev.tfvars.example infra/terraform/envs/dev.tfvars   # edit: AZs, Bedrock model + ARNs
+cp infra/terraform/backend.tf.example infra/terraform/backend.tf             # remote state bucket (create it separately)
+./scripts/deploy.sh bootstrap     # everything except the services
+./scripts/deploy.sh release       # build + push :<git-sha>, then enable the services
+./scripts/deploy.sh migrate       # create database tables (once)
+# API (optional): set enable_api=true, api_certificate_arn, api_allowed_cidrs, then
+aws secretsmanager put-secret-value --secret-id "$(terraform -chdir=infra/terraform output -raw api_tokens_secret_arn)" \
+  --secret-string 'TOKEN1:rita:reader,TOKEN2:rob:reviewer'
+```
+
+## READ THIS: what was and was NOT verified
+**Never run: `terraform init/validate/plan/apply`.** This environment has no AWS credentials, and the Terraform/OpenTofu
+provider registries are blocked, so the AWS provider could not even be downloaded. The Terraform has **never been planned
+against AWS**, and the Docker image has **never been built** (no Docker here). Expect the first real `plan` to surface a
+small number of errors I could not see, such as an argument name the provider schema rejects.
+
+What WAS verified:
+- `tofu fmt` clean; all files parse (python-hcl2); every `resource.name`, `var.x`, `local.x` reference resolves to something declared (a typo-catcher standing in for `validate`).
+- 44 policy tests: encryption, no open CIDRs, no internet path, least-privilege IAM, hardening, secrets by reference, safe defaults.
+- `checkov`: **314 passed, 0 failed, 12 skipped** (each skip is documented inline with its reason; see "Known gaps"). The Dockerfile passes 64/64.
+- The worker against real boto3 S3 + SQS (moto), including DLQ redrive, heartbeat, backoff values, URL-encoded keys, shutdown.
+- A clean venv with only `requirements.txt` imports everything the image runs.
+
+### First-deploy checklist (the things only a real deploy can confirm)
+1. `terraform validate` then `plan`. Fix any provider-schema errors.
+2. **Upload events reach the queue.** Upload a file, then check the queue within a minute. If not: the `eventbridge-delivery-failing` alarm / EventBridge `FailedInvocations` metric. The KMS key policy lets `events.amazonaws.com` use the key with a `kms:ViaService = sqs...` condition; that is the most likely cross-service detail to need adjusting. Also confirm whether keys in the event arrive URL-encoded (the worker tries both forms).
+3. **Bedrock:** model access enabled in the console; ARNs match (cross-region inference profiles need the underlying model ARNs in each destination region too).
+4. **Textract async:** run a multi-page scanned PDF. It reads the temporary S3 copy *as the worker role*.
+5. **Read-only root filesystem:** only `/tmp` is writable. If a library writes elsewhere the container will crash on first use; check the worker log group.
+6. **Health check:** the task should turn HEALTHY within ~90s (it reads the worker's heartbeat file).
+7. Run `migrate` before the first upload. Set the API-token secret before enabling the API.
+8. Run the DynamoDB race test against real DynamoDB (see Phase 4 caveats).
+
+### Known gaps (honest list)
+- **Secret rotation** is not configured (Redis token, API tokens). The RDS-managed password does rotate if you enable it. Needs a rotation function and a rollout plan.
+- The app connects as the **database master user**. Production should use a least-privilege app user (or IAM database auth, already enabled on the instance).
+- **One KMS key** for everything. Per-service keys are a valid hardening step.
+- No VPC endpoint policies, no WAF, no public exposure path (deliberate; put API Gateway/CloudFront + WAF in front if needed).
+- No CI/CD pipeline yet (Phase 7), no dashboards beyond the alarms (Phase 7), no Alembic migrations.
+- Single region, no cross-region replication or disaster-recovery plan (a deliberate decision to make, not a default).
+- `original_retention_days` (30) is a **policy placeholder**: set it to your real retention requirement.
+- **Cost:** the nine interface endpoints bill hourly per AZ; at the published us-east-1 rate that is on the order of $130/month before any traffic (verify in the AWS pricing calculator). RDS, ElastiCache and always-on Fargate are on top. Use `deletion_protection=false` / `force_destroy=true` and `terraform destroy` for throwaway stacks, and set an AWS Budget first.
+- Tesseract throughput per Fargate vCPU is unmeasured; size `worker_cpu`/`worker_max_capacity` from a real load test, and mind Bedrock/Textract rate limits when raising the ceiling.

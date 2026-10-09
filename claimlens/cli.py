@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
 from claimlens.config import get_settings
-from claimlens.datagen import generate_samples
 from claimlens.eval.report import render_compare, render_report
 from claimlens.eval.runner import build_llms, build_ocr_for, evaluate, parse_config
 from claimlens.ocr.base import OcrError
@@ -77,6 +77,24 @@ def _check_gates(report, args) -> list[str]:
     return failures
 
 
+def _healthy() -> bool:
+    """Used by the container HEALTHCHECK. A stuck worker stops touching its heartbeat file; a dead API stops answering."""
+    import time
+    import urllib.request
+    from claimlens import worker
+    try:
+        if time.time() - worker.LIVENESS_FILE.stat().st_mtime < 120:
+            return True
+    except OSError:
+        pass
+    try:
+        port = os.getenv("CLAIMLENS_API_PORT", "8080")
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=3) as r:  # noqa: S310 (fixed localhost URL)
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="claimlens")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -121,6 +139,9 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--host", default="127.0.0.1")
     sv.add_argument("--port", type=int, default=8080)
 
+    sub.add_parser("healthcheck", help="exit 0 if this container is healthy (worker heartbeat fresh OR API answering)")
+    sub.add_parser("worker", help="run the SQS worker (this is the process that runs on Fargate)")
+
     sub.add_parser("db-init", help="create database tables (and the DynamoDB table if CLAIMLENS_IDEMPOTENCY=dynamodb)")
 
     eg = sub.add_parser("export-ground-truth", help="turn human-approved reviews into evaluation answer keys")
@@ -134,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "gen-data":
+            from claimlens.datagen import generate_samples  # lazy: dev-only dependency (reportlab)
             files = generate_samples(args.out, args.count, args.seed, difficulty=args.difficulty,
                                      scan_fraction=args.scan_fraction)
             print(f"Wrote {len(files)} files to {args.out} (answer keys in {args.out / 'ground_truth'})")
@@ -141,6 +163,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "serve":
             import uvicorn
             uvicorn.run("claimlens.api.main:build_app_from_env", factory=True, host=args.host, port=args.port)
+            return 0
+        if args.cmd == "healthcheck":
+            return 0 if _healthy() else 1
+        if args.cmd == "worker":
+            import boto3
+            from claimlens.api.main import build_service
+            from claimlens.worker import Worker
+            logging.getLogger().setLevel(logging.INFO)
+            service, session_factory, cfg = build_service()
+            if not cfg.sqs_queue_url:
+                print("CLAIMLENS_SQS_QUEUE_URL is not set", file=sys.stderr)
+                return 2
+            Worker(service, boto3.client("sqs", region_name=cfg.region), boto3.client("s3", region_name=cfg.region),
+                   session_factory, cfg).run_forever()
             return 0
         if args.cmd == "db-init":
             from claimlens.storage.db import init_db, make_engine

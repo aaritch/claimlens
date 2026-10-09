@@ -17,7 +17,7 @@ from claimlens.config import Settings
 from claimlens.eval.metrics import FIELDS
 from claimlens.models import DocType, ExtractedClaim, ProcessingResult
 from claimlens.rules.engine import REQUIRED_FIELDS, validate_claim
-from claimlens.storage.db import AuditLog, Document, ReviewEvent, utcnow
+from claimlens.storage.db import AuditLog, Document, ReviewEvent, Upload, utcnow
 
 REVIEWABLE = {"needs_review", "rejected"}
 CLAIM_COLUMNS = [f for f in FIELDS]  # the seven scored fields are real columns
@@ -248,3 +248,28 @@ def document_to_dict(d: Document) -> dict:
         "created_at": d.created_at, "updated_at": d.updated_at,
         "reviewed_by": d.reviewed_by, "reviewed_at": d.reviewed_at,
     }
+
+
+# ---- async uploads --------------------------------------------------------------------------------
+
+def create_upload(session: Session, upload_id: str, key: str, filename: str, requested_by: str) -> Upload:
+    row = Upload(id=upload_id, s3_key=key, filename=filename, requested_by=requested_by, state="pending")
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_upload(session: Session, upload_id: str) -> Optional[Upload]:
+    return session.get(Upload, upload_id)
+
+
+def mark_upload(session: Session, upload_id: str, state: str, document_id: Optional[str] = None,
+                error: Optional[str] = None) -> bool:
+    """Called by the worker. Returns False if there is no such upload (files dropped into S3 by other
+    means have no row, which is fine)."""
+    row = session.get(Upload, upload_id)
+    if row is None:
+        return False
+    row.state, row.document_id, row.error = state, document_id, (error or None)
+    session.flush()
+    return True

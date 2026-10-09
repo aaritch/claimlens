@@ -1,0 +1,33 @@
+# Throwaway dev stack. Copy to dev.tfvars (git-ignored) and adjust.
+project     = "claimlens"
+environment = "dev"
+aws_region  = "us-east-1"
+
+# Pinned on purpose (see variables.tf). Must exist in aws_region.
+availability_zones = ["us-east-1a", "us-east-1b"]
+
+# Teardown-friendly. NEVER for staging/prod.
+deletion_protection  = false
+force_destroy        = true
+secret_recovery_days = 0
+
+# Bedrock: enable the models in the console first, then list their ARNs (least privilege: no wildcards).
+bedrock_model_id          = "REPLACE_WITH_MODEL_OR_INFERENCE_PROFILE_ID"
+bedrock_classify_model_id = ""
+bedrock_model_arns = [
+  "arn:aws:bedrock:us-east-1::foundation-model/REPLACE_WITH_MODEL_ID",
+]
+
+# Two-phase rollout: apply with false, push the image, then set image_tag and true.
+enable_services = false
+image_tag       = ""
+
+alarm_email = ""
+
+# Optional API behind an internal load balancer
+enable_api          = false
+api_certificate_arn = ""
+api_allowed_cidrs   = []
+
+# Cheaper logs for a throwaway stack (default is 365 for regulated workloads)
+log_retention_days = 14

@@ -68,3 +68,53 @@ def test_export_ground_truth_command(env, samples, tmp_path, capsys):
     assert main(["export-ground-truth", "--out", str(out)]) == 0
     assert "Wrote 1 answer key" in capsys.readouterr().out
     assert load_ground_truth(out)[0]["expected"]["claim_reference"] == "CLM-424242"
+
+
+def test_api_without_sync_upload_needs_no_model_configuration(env):
+    """Production API: uploads go to S3 and a worker processes them, so the API starts with NO Bedrock settings."""
+    env.setenv("CLAIMLENS_API_AUTH", "disabled")
+    env.setenv("CLAIMLENS_SYNC_UPLOAD", "0")
+    env.setenv("CLAIMLENS_LLM", "bedrock")
+    env.delenv("CLAIMLENS_MODEL_ID", raising=False)
+    from claimlens.api.main import build_service
+    from claimlens.config import get_settings
+    service, _, _ = build_service(get_settings(), needs_model=False)
+    assert service.llm.model_id == "none"
+    assert TestClient(build_app_from_env()).get("/healthz").status_code == 200
+
+
+def test_worker_still_requires_a_model(env):
+    env.setenv("CLAIMLENS_LLM", "bedrock")
+    env.delenv("CLAIMLENS_MODEL_ID", raising=False)
+    from claimlens.api.main import build_service
+    from claimlens.llm.bedrock_client import LLMError
+    with pytest.raises(LLMError, match="CLAIMLENS_MODEL_ID"):
+        build_service()
+
+
+def test_database_and_redis_urls_are_assembled_safely_from_parts(monkeypatch):
+    """ECS injects host/user/password separately. A password with URL-special characters must not break the URL."""
+    from claimlens.config import get_settings
+    for k in ("CLAIMLENS_DATABASE_URL", "CLAIMLENS_REDIS_URL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("CLAIMLENS_DB_HOST", "db.internal")
+    monkeypatch.setenv("CLAIMLENS_DB_USER", "claimlens_admin")
+    monkeypatch.setenv("CLAIMLENS_DB_PASSWORD", "p@ss/w:rd#1?&")
+    monkeypatch.setenv("CLAIMLENS_REDIS_HOST", "cache.internal")
+    monkeypatch.setenv("CLAIMLENS_REDIS_AUTH_TOKEN", "tok@en/with:odd#chars")
+    s = get_settings()
+    from sqlalchemy.engine import make_url
+    url = make_url(s.database_url)
+    assert (url.host, url.username, url.password, url.database) == ("db.internal", "claimlens_admin", "p@ss/w:rd#1?&", "claimlens")
+    assert url.query == {"sslmode": "require"}
+    assert s.redis_url.startswith("rediss://:") and "@cache.internal:6379/0" in s.redis_url
+    assert "tok@en" not in s.redis_url                      # special characters are percent-encoded
+    from urllib.parse import unquote, urlparse
+    assert unquote(urlparse(s.redis_url).password) == "tok@en/with:odd#chars"
+
+
+def test_explicit_urls_win_over_parts(monkeypatch):
+    from claimlens.config import get_settings
+    monkeypatch.setenv("CLAIMLENS_DATABASE_URL", "sqlite:///x.db")
+    monkeypatch.setenv("CLAIMLENS_DB_HOST", "ignored")
+    assert get_settings().database_url == "sqlite:///x.db"

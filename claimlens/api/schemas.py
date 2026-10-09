@@ -63,3 +63,22 @@ class ReviewIn(BaseModel):
     expected_version: int = Field(ge=1, description="the `version` you loaded; protects against overwriting a colleague's change")
     corrections: dict[str, Any] = Field(default_factory=dict)
     note: Optional[str] = Field(default=None, max_length=1000)
+
+
+class UploadRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+
+
+class UploadTicket(BaseModel):
+    upload_id: str
+    url: str
+    fields: dict[str, str]
+    expires_in: int
+    max_bytes: int
+
+
+class UploadStatus(BaseModel):
+    upload_id: str
+    state: Literal["pending", "processed", "duplicate", "failed"]
+    document_id: Optional[str] = None
+    error: Optional[str] = None

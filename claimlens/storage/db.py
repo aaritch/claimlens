@@ -123,6 +123,22 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, index=True)
 
 
+class Upload(Base):
+    """One row per presigned upload. Lets a client ask "what happened to the file I sent?" even though processing
+    is asynchronous, and even when two uploads turn out to be the same document."""
+    __tablename__ = "uploads"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    s3_key: Mapped[str] = mapped_column(String(1024))
+    filename: Mapped[str] = mapped_column(String(255))
+    requested_by: Mapped[str] = mapped_column(String(100), index=True)
+    state: Mapped[str] = mapped_column(String(12), default="pending")  # pending | processed | duplicate | failed
+    document_id: Mapped[Optional[str]] = mapped_column(String(36))
+    error: Mapped[Optional[str]] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+
 class IdempotencyRow(Base):
     """Used only by the SQL idempotency backend (local/dev). Production uses DynamoDB."""
     __tablename__ = "idempotency"

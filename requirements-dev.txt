@@ -1,0 +1,8 @@
+-r requirements.txt
+reportlab>=4.0          # synthetic test documents only
+pytest>=8.0
+pytest-cov>=5.0
+httpx>=0.27
+fakeredis>=2.21
+moto[dynamodb,s3,sqs]>=5.0
+python-hcl2>=4.3        # parses the Terraform for the policy-as-code tests
