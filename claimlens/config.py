@@ -41,6 +41,13 @@ class Settings:
     worker_concurrency: int      # messages processed in parallel by one worker task
     queue_visibility_seconds: int
     sync_upload_enabled: bool    # POST /documents (process inside the request). Off in production.
+    opaque_source_names: bool = True
+    environment: str = "dev"
+    metrics_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
+    oidc_roles_claim: str = "cognito:groups"
 
 
 def _database_url() -> str:
@@ -106,4 +113,11 @@ def get_settings() -> Settings:
         worker_concurrency=int(os.getenv("CLAIMLENS_WORKER_CONCURRENCY", "4")),
         queue_visibility_seconds=int(os.getenv("CLAIMLENS_QUEUE_VISIBILITY_SECONDS", "900")),
         sync_upload_enabled=os.getenv("CLAIMLENS_SYNC_UPLOAD", "1") == "1",
+        opaque_source_names=os.getenv("CLAIMLENS_OPAQUE_SOURCE_NAMES", "1") == "1",
+        environment=os.getenv("CLAIMLENS_ENVIRONMENT", "dev"),
+        metrics_enabled=os.getenv("CLAIMLENS_METRICS", "0") == "1",
+        oidc_issuer=os.getenv("CLAIMLENS_OIDC_ISSUER", ""),
+        oidc_audience=os.getenv("CLAIMLENS_OIDC_AUDIENCE", ""),
+        oidc_jwks_url=os.getenv("CLAIMLENS_OIDC_JWKS_URL", ""),
+        oidc_roles_claim=os.getenv("CLAIMLENS_OIDC_ROLES_CLAIM", "cognito:groups"),
     )

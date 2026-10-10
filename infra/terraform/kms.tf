@@ -75,6 +75,39 @@ data "aws_iam_policy_document" "kms" {
       values   = ["sns.${var.aws_region}.amazonaws.com"]
     }
   }
+  statement {
+    sid       = "CloudTrailEncryption"
+    actions   = ["kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:cloudtrail:${var.aws_region}:${local.account_id}:trail/${local.name}"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "kms:EncryptionContext:aws:cloudtrail:arn"
+      values   = ["arn:aws:cloudtrail:${var.aws_region}:${local.account_id}:trail/${local.name}"]
+    }
+  }
+  statement {
+    sid       = "CloudTrailDescribeKey"
+    actions   = ["kms:DescribeKey"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = ["arn:aws:cloudtrail:${var.aws_region}:${local.account_id}:trail/${local.name}"]
+    }
+  }
 }
 
 resource "aws_kms_key" "main" {

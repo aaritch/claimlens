@@ -13,3 +13,5 @@ pypdfium2>=4.30
 fastapi>=0.110
 uvicorn>=0.29
 python-multipart>=0.0.9
+alembic>=1.14
+pyjwt[crypto]>=2.10

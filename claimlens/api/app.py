@@ -18,6 +18,8 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, Response, UploadFile
 from sqlalchemy import text
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from claimlens.api.auth import Actor, Authenticator
 from claimlens.api.schemas import (DocumentList, DocumentOut, IngestResponse, ReviewIn, UploadRequest, UploadStatus,
@@ -39,15 +41,29 @@ STATUSES = {"validated", "needs_review", "rejected", "needs_ocr", "error"}
 
 def create_app(service: ProcessingService, session_factory, settings: Settings, authenticator: Authenticator,
                enable_docs: bool = True, s3_client=None) -> FastAPI:
-    app = FastAPI(title="ClaimLens API", version="0.4.0",
+    app = FastAPI(title="ClaimLens API", version="0.8.0",
                   docs_url="/docs" if enable_docs else None, redoc_url=None,
                   openapi_url="/openapi.json" if enable_docs else None)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        # FastAPI's default response includes rejected inputs, which may contain identifiers or secrets.
+        return JSONResponse(status_code=422, content={"detail": [
+            {"loc": list(error["loc"]), "type": error["type"]} for error in exc.errors()
+        ]})
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"          # responses can contain regulated data: never cache them
         response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        if request.url.path.startswith("/review"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            )
         return response
 
     def actor_for(min_role: str):
@@ -87,9 +103,12 @@ def create_app(service: ProcessingService, session_factory, settings: Settings, 
         if not settings.documents_bucket:
             raise HTTPException(503, "uploads are not configured on this server")
         name = safe_basename(body.filename)
-        if Path(name).suffix.lower() not in ALLOWED_EXTENSIONS:
-            raise HTTPException(415, f"unsupported file type '{Path(name).suffix.lower()}'")
+        ext = Path(name).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(415, "unsupported file type")
         upload_id = str(uuid.uuid4())
+        if settings.opaque_source_names:
+            name = f"{upload_id}{ext}"
         key = f"{settings.upload_prefix}{upload_id}/{name}"
         client = s3_client or _default_s3()
         post = client.generate_presigned_post(
@@ -199,4 +218,6 @@ def create_app(service: ProcessingService, session_factory, settings: Settings, 
                 raise HTTPException(422, {"problems": exc.problems})
         return load(document_id)
 
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/review", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="review_ui")
     return app

@@ -26,7 +26,7 @@ tf_out() { tf output -raw "$1"; }
 
 git_sha() {
   # Refuse to ship uncommitted code: an image tag must identify exactly one source tree.
-  if ! git -C "$APP_DIR" diff --quiet HEAD -- 2>/dev/null; then
+  if [ -n "$(git -C "$APP_DIR" status --porcelain)" ]; then
     die "working tree has uncommitted changes; commit first so the image tag (git SHA) means something"
   fi
   git -C "$APP_DIR" rev-parse --short=12 HEAD
@@ -70,15 +70,13 @@ case "${1:-}" in
     read -r -p "Apply this plan? [y/N] " answer
     [ "$answer" = "y" ] || die "aborted"
     tf apply tfplan.release
-    log "released $TAG. Watch: aws ecs describe-services (circuit breaker rolls back a bad image automatically)"
+    python "$APP_DIR/scripts/finish_deployment.py" --terraform-dir "$TF_DIR" --terraform-bin "$TF_BIN"
+    log "released $TAG; migration and service stability verified"
     ;;
 
   migrate)
     log "running the database migration task"
-    CMD="$(tf_out migrate_command)"
-    log "$CMD"
-    eval "$CMD"
-    log "check the task's logs in CloudWatch (log group /<project>/<env>/migrate)"
+    python "$APP_DIR/scripts/finish_deployment.py" --terraform-dir "$TF_DIR" --terraform-bin "$TF_BIN"
     ;;
 
   *)

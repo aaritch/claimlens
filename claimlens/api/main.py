@@ -10,7 +10,8 @@ import os
 from fastapi import FastAPI
 
 from claimlens.api.app import create_app
-from claimlens.api.auth import Authenticator
+from claimlens.api.auth import Authenticator, OIDCAuthenticator
+from claimlens.logging_safe import configure_logging
 from claimlens.config import get_settings
 from claimlens.llm.bedrock_client import BedrockClient, LLMError
 from claimlens.llm.mock import MockLLM
@@ -53,8 +54,11 @@ def build_service(settings=None, needs_model: bool = True):
 
 
 def build_app_from_env() -> FastAPI:
+    configure_logging()
     settings = get_settings()
     # With synchronous upload off, this server never calls a model, so it needs no model IDs and no Bedrock access.
     service, session_factory, settings = build_service(settings, needs_model=settings.sync_upload_enabled)
-    auth = Authenticator(settings.api_tokens, disabled=settings.api_auth_disabled)  # refuses to start if unconfigured
+    auth = (OIDCAuthenticator(settings.oidc_issuer, settings.oidc_audience, settings.oidc_jwks_url,
+                              settings.oidc_roles_claim) if settings.oidc_issuer
+            else Authenticator(settings.api_tokens, disabled=settings.api_auth_disabled))
     return create_app(service, session_factory, settings, auth, enable_docs=os.getenv("CLAIMLENS_API_DOCS", "1") == "1")

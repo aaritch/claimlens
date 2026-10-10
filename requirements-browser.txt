@@ -1,0 +1,2 @@
+# Optional UI end-to-end tests; install alongside requirements-dev.txt.
+playwright>=1.49

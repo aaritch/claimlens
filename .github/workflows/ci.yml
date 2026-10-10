@@ -1,0 +1,72 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install dependencies and local OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr
+          python -m pip install -r requirements-dev.txt -r requirements-browser.txt
+          python -m playwright install --with-deps chromium
+      - name: Lint and type-check maintained modules
+        run: |
+          ruff check claimlens scripts tests
+          mypy
+      - name: Tests and coverage
+        env:
+          CLAIMLENS_BROWSER_TESTS: "1"
+        run: pytest --cov=claimlens --cov-report=term-missing --cov-report=xml
+      - name: Offline evaluation regression gate
+        run: |
+          python -m claimlens gen-data --out data/ci --count 60 --seed 3 --difficulty hard
+          python -m claimlens eval --data data/ci --config "label=ci,llm=mock:careful" --min-f1 0.90 --min-auto-accept-precision 0.99 --min-error-catch-rate 0.95
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-test-reports
+          path: |
+            coverage.xml
+            results/eval/
+          retention-days: 7
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - run: terraform -chdir=infra/terraform fmt -check -recursive
+      - run: terraform -chdir=infra/terraform init -backend=false -input=false
+      - run: terraform -chdir=infra/terraform validate
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build immutable source image
+        run: |
+          docker build --platform linux/amd64 -t "claimlens:${GITHUB_SHA}" .
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,noexec,size=128m -e PYTHONPATH=/app -e CLAIMLENS_DATABASE_URL=sqlite:////tmp/smoke.db -e CLAIMLENS_LLM=mock:careful -v "$PWD/scripts/container_smoke.py:/smoke.py:ro" --entrypoint python "claimlens:${GITHUB_SHA}" /smoke.py
+          docker save "claimlens:${GITHUB_SHA}" -o /tmp/claimlens-image.tar
+      - name: Scan image (never publish on pull requests)
+        run: |
+          docker run --rm -v /tmp:/scan:ro aquasec/trivy:0.65.0 image --input /scan/claimlens-image.tar --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1

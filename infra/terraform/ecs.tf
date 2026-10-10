@@ -31,6 +31,8 @@ locals {
   # Non-secret settings every container shares. The app assembles its database and Redis URLs from these parts.
   common_environment = [
     { name = "AWS_REGION", value = var.aws_region },
+    { name = "CLAIMLENS_ENVIRONMENT", value = var.environment },
+    { name = "CLAIMLENS_OPAQUE_SOURCE_NAMES", value = "1" },
     { name = "PYTHONDONTWRITEBYTECODE", value = "1" },
     { name = "CLAIMLENS_DB_HOST", value = aws_db_instance.main.address },
     { name = "CLAIMLENS_DB_PORT", value = tostring(aws_db_instance.main.port) },
@@ -106,6 +108,7 @@ resource "aws_ecs_task_definition" "worker" {
     stopTimeout = 120 # Fargate maximum: time to finish in-flight documents after SIGTERM
     environment = concat(local.common_environment, local.runtime_environment, [
       { name = "CLAIMLENS_LLM", value = "bedrock" },
+      { name = "CLAIMLENS_METRICS", value = "1" },
       { name = "CLAIMLENS_MODEL_ID", value = var.bedrock_model_id },
       { name = "CLAIMLENS_CLASSIFY_MODEL_ID", value = var.bedrock_classify_model_id },
       { name = "CLAIMLENS_OCR", value = var.ocr_spec },
@@ -295,7 +298,7 @@ resource "aws_ecs_task_definition" "migrate" {
     name        = "migrate"
     image       = local.image
     essential   = true
-    command     = ["db-init"]
+    command     = ["db-migrate"]
     environment = local.common_environment
     secrets     = local.db_secrets
     logConfiguration = {

@@ -28,6 +28,7 @@ from claimlens.config import Settings, get_settings
 from claimlens.llm.prompts import load_prompt
 from claimlens.pipeline import CLASSIFY_PROMPT, EXTRACT_PROMPT, process_file
 from claimlens.rules.engine import RULES_VERSION
+from claimlens.observability import Metrics
 from claimlens.storage import repository as repo
 from claimlens.storage.cache import NullCache, ResultCache
 from claimlens.storage.idempotency import DONE, IN_PROGRESS, IdempotencyStore
@@ -68,6 +69,7 @@ class ProcessingService:
         self.cache = cache or NullCache()
         self.settings = settings or get_settings()
         self.classify_prompt, self.extract_prompt, self.ocr_spec = classify_prompt, extract_prompt, ocr_spec
+        self.metrics = Metrics(self.settings.environment, self.settings.metrics_enabled)
 
     @property
     def fingerprint(self) -> str:
@@ -85,7 +87,9 @@ class ProcessingService:
         source_name = safe_basename(filename)
         ext = Path(source_name).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
-            raise UnsupportedUpload(f"unsupported file type '{ext}'")
+            raise UnsupportedUpload("unsupported file type")
+        if self.settings.opaque_source_names:
+            source_name = f"{uuid.uuid4().hex}{ext}"
 
         sha, fp = hashlib.sha256(data).hexdigest(), self.fingerprint
         key = f"{sha}:{fp}"
@@ -119,6 +123,7 @@ class ProcessingService:
                 result = process_file(path, self.llm, self.settings, self.classify_llm,
                                       classify_prompt=self.classify_prompt, extract_prompt=self.extract_prompt,
                                       ocr=self.ocr)
+            self.metrics.record(result)
 
             if result.status == "error" and result.error_kind == "transient":
                 self.idempotency.fail(key, owner, result.error or "transient error")

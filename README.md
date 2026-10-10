@@ -1,10 +1,14 @@
-# ClaimLens (Phases 0-5): extraction + evaluation + OCR + storage + API + AWS deployment
+# ClaimLens (Phases 0-8): document intake, evaluation, review, security, delivery and analytics
 
 Parses messy healthcare-style documents (PDF, DOCX, EML with attachments, TXT),
 classifies them and extracts structured fields with **AWS Bedrock** (forced tool
 use + Pydantic), then double-checks the result with **deterministic rules**.
 
 > **Synthetic data only.** Never put real PHI/PII in this project.
+
+**Start here:** [architecture](docs/architecture.md), [Phases 6–8 guide](docs/phases-6-8.md),
+[security notes](docs/security-notes.md), [operations runbook](docs/operations.md),
+and [offline demo](docs/demo.md). `project-outline.md` is the original roadmap, not the current API contract.
 
 ## 1. Setup
 
@@ -84,8 +88,10 @@ file -> parser router -> ParsedDocument -> classify (LLM) -> extract (LLM) -> ru
 3. Copy `prompts/extract_v1.txt` to `extract_v2.txt`, change the wording, point `EXTRACT_PROMPT` in `pipeline.py` at it, and compare results. That's the seed of Phase 2's A/B testing.
 4. Add a new document type (enum in `models.py`, template in `datagen.py`, required fields in `rules/engine.py`).
 
-## 6. Next phases
-- **Phase 3:** OCR fallback (Textract async for multi-page, optional Tesseract) for `needs_ocr` documents.
+## 6. Implementation status
+Phases 0–5 provide parsing, extraction, evaluation, OCR, storage and the event-driven AWS stack.
+Phases 6–8 add security controls, delivery workflows, monitoring, analytics and the human review UI.
+These are a synthetic-data reference implementation, not a claim of HIPAA compliance or a verified live deployment.
 
 ---
 
@@ -319,14 +325,17 @@ Permanent failures are recorded once (status `error`) so a bad file is not retri
 - **Why a DynamoDB lease *and* a unique constraint?** Different failure modes: the lease prevents wasted *work* (two model bills); the constraint prevents wrong *data*.
 - **Why store extracted fields as columns, not just JSON?** So you can filter, join and aggregate in SQL (Phase 8's Athena/analytics goal). The raw model output is kept as JSON for audit/eval.
 - **Money is `NUMERIC(12,2)`** but read back as float in this learning project; a real billing system would keep `Decimal` end to end.
-- **Filenames can contain PHI** (people name their files). They're stored as `source_name`; Phase 6 should replace them with opaque IDs.
+- **Filenames can contain PHI.** New uploads and stored `source_name` values use opaque IDs by default.
+  Existing rows are not silently rewritten. `CLAIMLENS_OPAQUE_SOURCE_NAMES=0` is a local synthetic-demo escape hatch only.
 
 ## Caveats (read these)
 - **DynamoDB's atomicity is NOT proven by these tests.** Experiment showed moto's in-process emulator lets two threads "win" a conditional write ~1 time in 40 under contention (even for the simplest `attribute_not_exists` condition), so the DynamoDB contract tests serialize calls and validate *our condition logic*. Real DynamoDB makes conditional writes atomic; to verify against a real implementation run `CLAIMLENS_TEST_DDB_ENDPOINT=http://localhost:8000 pytest tests/test_idempotency.py -k true_dynamodb` (DynamoDB Local), or the same code against a dev AWS account. The SQL backend's 16-thread race *is* tested for real on Postgres.
 - `docker-compose.yml` is untested. Postgres, Redis and the DynamoDB wiring were verified natively and over HTTP (moto server).
-- Tables are created with `create_all` (`db-init`). Production should use **Alembic migrations** so schema changes are reviewed and reversible.
-- Auth is static bearer tokens (hash-compared in constant time). Real deployments should use Cognito/OIDC (Phase 5-6). There is no rate limiting yet.
-- `POST /documents` processes synchronously and holds the request open. Phase 5 turns this into presigned S3 upload + queue + worker; the resource shapes stay the same.
+- `db-init` remains a local/test bootstrap. Deployments now use **Alembic migrations** via `db-migrate`.
+  Back up legacy databases before the explicit `db-migrate --adopt-legacy` transition.
+- Auth supports static bearer tokens or RS256 OIDC ID tokens with pinned issuer/audience/JWKS and explicit roles.
+  Production OIDC needs private-network reachability to the identity provider. There is no rate limiting yet.
+- `POST /documents` processes synchronously for local demos. Production disables it and uses presigned S3 upload + queue + worker.
 - Running the Postgres tests: `export CLAIMLENS_TEST_PG_URL=postgresql+psycopg://user:pass@localhost/dbname` (the tests drop and recreate tables in that database, so use a throwaway one).
 
 ---
@@ -383,12 +392,12 @@ aws secretsmanager put-secret-value --secret-id "$(terraform -chdir=infra/terraf
 ```
 
 ## READ THIS: what was and was NOT verified
-**Never run: `terraform init/validate/plan/apply`.** This environment has no AWS credentials, and the Terraform/OpenTofu
-provider registries are blocked, so the AWS provider could not even be downloaded. The Terraform has **never been planned
-against AWS**, and the Docker image has **never been built** (no Docker here). Expect the first real `plan` to surface a
-small number of errors I could not see, such as an argument name the provider schema rejects.
+Terraform provider initialization (`-backend=false`) and schema validation now succeed locally.
+The Terraform has **not been planned or applied against AWS**. Live IAM, KMS, EventBridge, CloudTrail,
+identity-provider networking, and service behavior still require the first-deploy checks.
+The delivery workflows are added to the repository, but have not been installed or run on GitHub or Jenkins.
 
-What WAS verified:
+Historical Phase 5 checks (scanner counts below were not re-run for Phases 6–8):
 - `tofu fmt` clean; all files parse (python-hcl2); every `resource.name`, `var.x`, `local.x` reference resolves to something declared (a typo-catcher standing in for `validate`).
 - 44 policy tests: encryption, no open CIDRs, no internet path, least-privilege IAM, hardening, secrets by reference, safe defaults.
 - `checkov`: **314 passed, 0 failed, 12 skipped** (each skip is documented inline with its reason; see "Known gaps"). The Dockerfile passes 64/64.
@@ -409,8 +418,10 @@ What WAS verified:
 - **Secret rotation** is not configured (Redis token, API tokens). The RDS-managed password does rotate if you enable it. Needs a rotation function and a rollout plan.
 - The app connects as the **database master user**. Production should use a least-privilege app user (or IAM database auth, already enabled on the instance).
 - **One KMS key** for everything. Per-service keys are a valid hardening step.
-- No VPC endpoint policies, no WAF, no public exposure path (deliberate; put API Gateway/CloudFront + WAF in front if needed).
-- No CI/CD pipeline yet (Phase 7), no dashboards beyond the alarms (Phase 7), no Alembic migrations.
+- S3/DynamoDB gateway endpoint policies are now scoped. Interface endpoint policies and WAF remain production hardening tasks.
+  There is no public exposure path (deliberate).
+- CI/CD workflows, a dashboard, application alarms and Alembic migrations are now present.
+  Required reviewers, OIDC trust, environment variables and live service tests must be configured by an operator.
 - Single region, no cross-region replication or disaster-recovery plan (a deliberate decision to make, not a default).
 - `original_retention_days` (30) is a **policy placeholder**: set it to your real retention requirement.
 - **Cost:** the nine interface endpoints bill hourly per AZ; at the published us-east-1 rate that is on the order of $130/month before any traffic (verify in the AWS pricing calculator). RDS, ElastiCache and always-on Fargate are on top. Use `deletion_protection=false` / `force_destroy=true` and `terraform destroy` for throwaway stacks, and set an AWS Budget first.

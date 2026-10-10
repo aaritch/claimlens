@@ -22,6 +22,8 @@ from claimlens.ocr.factory import build_ocr
 from claimlens.llm.bedrock_client import BedrockClient, LLMError
 from claimlens.llm.mock import MockLLM
 from claimlens.pipeline import process_file
+from claimlens.logging_safe import configure_logging
+from claimlens.storage.migrations import MigrationError
 
 SUPPORTED = {".pdf", ".docx", ".eml", ".txt", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
@@ -143,15 +145,27 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("worker", help="run the SQS worker (this is the process that runs on Fargate)")
 
     sub.add_parser("db-init", help="create database tables (and the DynamoDB table if CLAIMLENS_IDEMPOTENCY=dynamodb)")
+    dm = sub.add_parser("db-migrate", help="upgrade the database using versioned migrations")
+    dm.add_argument("--adopt-legacy", action="store_true", help="stamp a schema-checked legacy database (back it up first)")
 
     eg = sub.add_parser("export-ground-truth", help="turn human-approved reviews into evaluation answer keys")
     eg.add_argument("--out", type=Path, required=True)
+
+    ae = sub.add_parser("export-analytics", help="export validated business fields as Parquet (optional analytics dependencies)")
+    ae.add_argument("--out", type=Path, required=True)
+    ae.add_argument("--upload-bucket", default="", help="explicitly upload the new export to S3")
+    ae.add_argument("--key", default="", help="S3 key under exports/, ending in .parquet")
+    ae.add_argument("--kms-key", default="", help="customer-managed key for the uploaded export")
+    sf = sub.add_parser("sync-salesforce", help="preview a validated claim upsert (synthetic data only)")
+    sf.add_argument("--document-id", required=True)
+    sf.add_argument("--execute", action="store_true", help="actually send business fields to the configured Salesforce org")
+    sf.add_argument("--synthetic-data-only", action="store_true", help="acknowledge that the selected claim is synthetic")
 
     c = sub.add_parser("compare", help="A/B two configurations on the same documents")
     add_eval_args(c, many_configs=True)
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging()
 
     try:
         if args.cmd == "gen-data":
@@ -162,7 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.cmd == "serve":
             import uvicorn
-            uvicorn.run("claimlens.api.main:build_app_from_env", factory=True, host=args.host, port=args.port)
+            uvicorn.run("claimlens.api.main:build_app_from_env", factory=True, host=args.host, port=args.port,
+                        access_log=False, log_config=None)
             return 0
         if args.cmd == "healthcheck":
             return 0 if _healthy() else 1
@@ -189,12 +204,66 @@ def main(argv: list[str] | None = None) -> int:
                 msg += f"; DynamoDB table '{cfg.dynamodb_table}' ready"
             print(msg)
             return 0
+        if args.cmd == "db-migrate":
+            from claimlens.storage.db import make_engine
+            from claimlens.storage.migrations import migrate
+            engine = make_engine(get_settings().database_url)
+            try:
+                migrate(engine, adopt_legacy=args.adopt_legacy)
+            finally:
+                engine.dispose()
+            print("database migrations complete")
+            return 0
         if args.cmd == "export-ground-truth":
             from claimlens.storage import repository as repo
             from claimlens.storage.db import make_engine, make_session_factory
             with make_session_factory(make_engine(get_settings().database_url))() as session:
                 n = repo.export_ground_truth(session, args.out)
             print(f"Wrote {n} answer key(s) to {args.out / 'ground_truth'} (copy the original files next to them to evaluate)")
+            return 0
+        if args.cmd == "export-analytics":
+            from claimlens.analytics import export_parquet, upload_export
+            from claimlens.storage.db import make_engine, make_session_factory
+            if args.upload_bucket and (not args.kms_key or not args.key.startswith("exports/") or not args.key.endswith(".parquet")):
+                raise ValueError("provide the KMS key and exports/*.parquet S3 destination")
+            if not args.upload_bucket and (args.key or args.kms_key):
+                raise ValueError("S3 options require an upload bucket")
+            engine = make_engine(get_settings().database_url)
+            try:
+                with make_session_factory(engine)() as session:
+                    n = export_parquet(session, args.out)
+                    session.commit()
+                if args.upload_bucket:
+                    import boto3
+                    upload_export(args.out, args.upload_bucket, args.key, args.kms_key,
+                                  boto3.client("s3", region_name=get_settings().region))
+            finally:
+                engine.dispose()
+            print(f"Exported {n} validated record(s)")
+            return 0
+        if args.cmd == "sync-salesforce":
+            import json
+            from claimlens.integrations.salesforce import SalesforceClient, SalesforceError, sync_document
+            from claimlens.storage.db import make_engine, make_session_factory
+            if args.execute and not args.synthetic_data_only:
+                raise ValueError("execution requires synthetic-data acknowledgement")
+            client = (SalesforceClient(
+                os.getenv("CLAIMLENS_SALESFORCE_URL", ""), os.getenv("CLAIMLENS_SALESFORCE_TOKEN", ""),
+                os.getenv("CLAIMLENS_SALESFORCE_OBJECT", "Claim__c"),
+                os.getenv("CLAIMLENS_SALESFORCE_EXTERNAL_ID", "Document_ID__c"),
+                os.getenv("CLAIMLENS_SALESFORCE_API_VERSION", "v61.0"),
+            ) if args.execute else None)
+            engine = make_engine(get_settings().database_url)
+            try:
+                with make_session_factory(engine)() as session:
+                    preview = sync_document(session, args.document_id, client, execute=args.execute)
+                    session.commit()
+            except SalesforceError as exc:
+                print(f"Salesforce export failed; retryable={exc.retryable}", file=sys.stderr)
+                return 1
+            finally:
+                engine.dispose()
+            print(json.dumps(preview))
             return 0
         if args.cmd == "eval":
             report = _evaluate_config(args.config, args)
@@ -227,6 +296,24 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except OcrError as exc:
         print(f"OCR configuration error: {exc}", file=sys.stderr)
+        return 2
+    except MigrationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ValueError:
+        print("Invalid configuration or input. Check the command and documented settings.", file=sys.stderr)
+        return 2
+    except FileExistsError:
+        print("Output already exists. Choose a new export path.", file=sys.stderr)
+        return 2
+    except ModuleNotFoundError:
+        print("A required dependency is missing. Install the documented requirements for this command.", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        logging.getLogger(__name__).error("command failed", extra={
+            "event": "command_failed", "fields": {"error_class": exc.__class__.__name__},
+        })
+        print("Command failed. Check configuration and the safe operational logs.", file=sys.stderr)
         return 2
 
 

@@ -25,7 +25,7 @@ FILES = sorted(TF_DIR.glob("*.tf"))
 # ---- helpers ---------------------------------------------------------------------------------------------
 def attr(block, key, default=None):
     v = block.get(key)
-    return default if v is None else v[0]
+    return default if v is None else v
 
 
 def parse(path):
@@ -137,7 +137,7 @@ def test_required_vpc_endpoints_exist(tf):
     r = tf["resources"]["aws_vpc_endpoint"]
     assert {"s3", "dynamodb", "interface"} <= set(r)
     assert attr(r["s3"], "vpc_endpoint_type") == "Gateway" and attr(r["dynamodb"], "vpc_endpoint_type") == "Gateway"
-    services = set(re.findall(r"'([a-z0-9.\-]+)'", str(tf["locals"]["interface_endpoints"])))
+    services = set(re.findall(r"[a-z][a-z0-9.\-]*", str(tf["locals"]["interface_endpoints"])))
     for needed in ("ecr.api", "ecr.dkr", "logs", "sqs", "kms", "sts", "secretsmanager", "bedrock-runtime", "textract"):
         assert needed in services, f"missing VPC endpoint for {needed}: tasks would hang trying to reach it"
 
@@ -156,7 +156,7 @@ def test_kms_key_rotates_and_the_policy_names_only_expected_principals(tf):
         for p in st.get("principals", []):
             principals.update(attr(p, "identifiers"))
     assert principals == {"arn:aws:iam::${local.account_id}:root", "logs.${var.aws_region}.amazonaws.com",
-                          "events.amazonaws.com", "cloudwatch.amazonaws.com"}
+                          "events.amazonaws.com", "cloudwatch.amazonaws.com", "cloudtrail.amazonaws.com"}
 
 
 def bucket_children(tf, bucket):
@@ -169,7 +169,7 @@ def bucket_children(tf, bucket):
     return found
 
 
-@pytest.mark.parametrize("bucket", ["documents", "access_logs"])
+@pytest.mark.parametrize("bucket", ["documents", "access_logs", "audit"])
 def test_every_bucket_is_private_versioned_encrypted_tls_only_and_lifecycle_managed(tf, bucket):
     kids = bucket_children(tf, bucket)
     for needed in ("aws_s3_bucket_public_access_block", "aws_s3_bucket_versioning",
@@ -365,3 +365,52 @@ def test_availability_zones_are_pinned_not_discovered(tf):
     assert attr(az["filter"][0], "name") == "zone-name"
     assert "postcondition" in json.dumps(az)          # a wrong zone name fails loudly at plan time
     assert "sort(" in attr(tf["locals"], "azs", "") or "sort(" in str(tf["locals"]["azs"])
+
+
+def test_cloudtrail_captures_original_access_and_validates_log_files(tf):
+    trail = tf["resources"]["aws_cloudtrail"]["main"]
+    assert attr(trail, "enable_log_file_validation") is True and attr(trail, "enable_logging") is True
+    assert attr(trail, "is_multi_region_trail") is True
+    assert "aws_kms_key.main" in attr(trail, "kms_key_id")
+    selector = trail["event_selector"][0]
+    assert attr(selector, "include_management_events") is True
+    assert attr(selector["data_resource"][0], "type") == "AWS::S3::Object"
+    assert "aws_s3_bucket.documents.arn" in str(selector["data_resource"][0])
+    policy = tf["data"]["aws_iam_policy_document"]["audit_bucket"]
+    assert "aws:SourceArn" in json.dumps(policy)
+    encryption = [s for s in statements(tf["data"]["aws_iam_policy_document"]["kms"])
+                  if attr(s, "sid") == "CloudTrailEncryption"][0]
+    assert "kms:EncryptionContext:aws:cloudtrail:arn" in json.dumps(encryption)
+
+
+def test_access_analyzer_and_gateway_endpoint_boundaries_are_present(tf):
+    assert attr(tf["resources"]["aws_accessanalyzer_analyzer"]["main"], "type") == "ACCOUNT"
+    for service in ("s3", "dynamodb"):
+        assert f"data.aws_iam_policy_document.{service}_endpoint" in attr(tf["resources"]["aws_vpc_endpoint"][service], "policy")
+    s3 = json.dumps(tf["data"]["aws_iam_policy_document"]["s3_endpoint"])
+    assert "starport-layer-bucket" in s3 and "aws:PrincipalAccount" in s3
+    ddb = json.dumps(tf["data"]["aws_iam_policy_document"]["dynamodb_endpoint"])
+    assert "aws_dynamodb_table.idempotency.arn" in ddb
+
+
+def test_dashboard_and_cost_error_alarms_use_the_app_metrics(tf):
+    dashboard = attr(tf["resources"]["aws_cloudwatch_dashboard"]["main"], "dashboard_body")
+    assert "ClaimLens" in dashboard and "IF(docs>0,cost/docs,0)" in dashboard
+    for name in ("processing_errors", "cost_per_document"):
+        alarm = tf["resources"]["aws_cloudwatch_metric_alarm"][name]
+        assert attr(alarm, "alarm_actions") == ["${aws_sns_topic.alerts.arn}"]
+    assert "CLAIMLENS_METRICS" in str(tf["resources"]["aws_ecs_task_definition"]["worker"])
+
+
+def test_analytics_is_opt_in_encrypted_bounded_and_not_a_worker_permission(tf):
+    assert attr(tf["variables"]["enable_analytics"], "default") is False
+    table = tf["resources"]["aws_glue_catalog_table"]["claims"]
+    assert "exports/" in str(table) and "parquet" in str(table).lower()
+    workgroup = tf["resources"]["aws_athena_workgroup"]["analytics"]
+    assert "bytes_scanned_cutoff_per_query" in str(workgroup) and "SSE_KMS" in str(workgroup)
+    assert "analytics" not in json.dumps(tf["data"]["aws_iam_policy_document"]["worker"])
+
+
+def test_deployment_uses_versioned_migration_and_opaque_names():
+    text = (TF_DIR / "ecs.tf").read_text()
+    assert 'command     = ["db-migrate"]' in text and "CLAIMLENS_OPAQUE_SOURCE_NAMES" in text

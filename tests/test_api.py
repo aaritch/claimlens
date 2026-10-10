@@ -160,7 +160,8 @@ def test_hostile_filename_is_neutralised(api):
     client, _ = api
     name, data = distinct_incomplete(2)
     r = upload(client, "../../etc/passwd.txt", data)
-    assert r.json()["document"]["source_name"] == "passwd.txt"
+    name = r.json()["document"]["source_name"]
+    assert name.endswith(".txt") and len(name) == 36 and "passwd" not in name
 
 
 def test_concurrent_identical_uploads_create_one_document(make_api, session_factory):

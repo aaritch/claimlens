@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Optional
 
-from sqlalchemy import (JSON, BigInteger, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text,
+from sqlalchemy import (JSON, BigInteger, Date, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text,
                         TypeDecorator, UniqueConstraint, create_engine)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -55,7 +55,7 @@ class Document(Base):
     page_count: Mapped[Optional[int]] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20))
     doc_type: Mapped[Optional[str]] = mapped_column(String(40))
-    classification_confidence: Mapped[Optional[float]] = mapped_column()
+    classification_confidence: Mapped[Optional[float]] = mapped_column(Float)
 
     # Extracted fields as real columns (this is why SQL is here: filter, join, aggregate, report).
     provider_npi: Mapped[Optional[str]] = mapped_column(String(10), index=True)
@@ -167,6 +167,5 @@ def make_session_factory(engine) -> sessionmaker[Session]:
 
 
 def init_db(engine) -> None:
-    """Create tables if missing. Fine for dev; production should use migrations (Alembic) so schema
-    changes are reviewed, versioned and reversible."""
+    """Local/test bootstrap only. Deployments use `db-migrate` (versioned Alembic revisions)."""
     Base.metadata.create_all(engine)

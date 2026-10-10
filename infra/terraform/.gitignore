@@ -5,6 +5,7 @@
 tfplan
 crash.log
 *.tfvars
+*.tfvars.json
 !*.tfvars.example
 backend.tf
 .terraform.lock.hcl.bak

@@ -1,0 +1,2 @@
+# Optional Parquet export. Not needed by the worker or API.
+pyarrow>=19.0

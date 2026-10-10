@@ -45,7 +45,7 @@ def test_ticket_points_at_a_unique_prefixed_key_with_a_size_limit(stack):
     r = ticket(client, "../../My Claim.pdf")
     assert r.status_code == 201
     t = r.json()
-    assert t["fields"]["key"] == f"incoming/{t['upload_id']}/My Claim.pdf"        # traversal stripped, id-scoped folder
+    assert t["fields"]["key"] == f"incoming/{t['upload_id']}/{t['upload_id']}.pdf"
     assert "docs-bucket" in t["url"] and t["expires_in"] == settings.upload_url_ttl_seconds
     policy = json.loads(base64.b64decode(t["fields"]["policy"]))
     assert ["content-length-range", 1, 5_000_000] in policy["conditions"]          # S3 itself enforces the limit

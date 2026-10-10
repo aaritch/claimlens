@@ -129,10 +129,13 @@ resource "aws_ecs_task_definition" "api" {
     environment = concat(local.common_environment, local.runtime_environment, [
       { name = "CLAIMLENS_SYNC_UPLOAD", value = "0" }, # production uploads go browser -> S3 -> queue -> worker
       { name = "CLAIMLENS_API_DOCS", value = "0" },
+      { name = "CLAIMLENS_OIDC_ISSUER", value = var.oidc_issuer },
+      { name = "CLAIMLENS_OIDC_AUDIENCE", value = var.oidc_audience },
+      { name = "CLAIMLENS_OIDC_JWKS_URL", value = var.oidc_jwks_url },
     ])
-    secrets = concat(local.db_secrets, local.redis_secrets, [
+    secrets = concat(local.db_secrets, local.redis_secrets, var.oidc_issuer == "" ? [
       { name = "CLAIMLENS_API_TOKENS", valueFrom = aws_secretsmanager_secret.api_tokens.arn },
-    ])
+    ] : [])
     logConfiguration = {
       logDriver = "awslogs"
       options = {

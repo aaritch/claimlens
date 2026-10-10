@@ -67,8 +67,12 @@ def process_file(
     def finish() -> ProcessingResult:
         result.elapsed_ms = int((perf_counter() - start) * 1000)
         # Only metadata is logged: never document text or extracted values.
-        log.info("file=%s status=%s calls=%d cost=$%.5f", result.filename, result.status,
-                 result.usage.llm_calls, result.usage.cost_usd)
+        log.info("processing finished", extra={
+            "event": "processing_finished",
+            "fields": {"status": result.status, "input_tokens": result.usage.input_tokens,
+                       "output_tokens": result.usage.output_tokens, "cost_usd": result.usage.cost_usd,
+                       "elapsed_ms": result.elapsed_ms},
+        })
         return result
 
     # Station 1: parse

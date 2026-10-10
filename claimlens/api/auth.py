@@ -59,3 +59,42 @@ class Authenticator:
         if match is None:
             raise HTTPException(401, "invalid token", headers={"WWW-Authenticate": "Bearer"})
         return match
+
+
+class OIDCAuthenticator:
+    """RS256 ID-token verification with pinned issuer/audience and explicit, deny-by-default role mapping."""
+
+    def __init__(self, issuer: str, audience: str, jwks_url: str, roles_claim: str = "cognito:groups", jwks_client=None):
+        from urllib.parse import urlsplit
+        import jwt
+        if not issuer or not audience or not jwks_url:
+            raise AuthConfigError("OIDC requires issuer, audience and JWKS URL")
+        for url in (issuer, jwks_url):
+            parsed = urlsplit(url)
+            if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+                raise AuthConfigError("OIDC URLs must use HTTPS without credentials")
+        self.issuer, self.audience, self.roles_claim = issuer, audience, roles_claim
+        self.jwks = jwks_client or jwt.PyJWKClient(jwks_url, timeout=5)
+
+    def authenticate(self, authorization: Optional[str]) -> Actor:
+        import jwt
+        scheme, _, token = (authorization or "").partition(" ")
+        if scheme.lower() != "bearer" or not token or len(token) > 16384:
+            raise HTTPException(401, "missing bearer token", headers={"WWW-Authenticate": "Bearer"})
+        try:
+            key = self.jwks.get_signing_key_from_jwt(token).key
+            claims = jwt.decode(token, key, algorithms=["RS256"], issuer=self.issuer, audience=self.audience,
+                                options={"require": ["exp", "iat", "sub", "iss", "aud"]})
+        except jwt.PyJWKClientConnectionError:
+            raise HTTPException(503, "identity provider unavailable")
+        except (jwt.PyJWTError, ValueError, TypeError):
+            raise HTTPException(401, "invalid token", headers={"WWW-Authenticate": "Bearer"})
+        roles = claims.get(self.roles_claim, [])
+        roles = [roles] if isinstance(roles, str) else roles
+        if not isinstance(roles, list):
+            raise HTTPException(403, "no authorized role")
+        allowed = [r for r in roles if isinstance(r, str) and r in ROLE_LEVEL]
+        subject = claims.get("sub")
+        if not allowed or not isinstance(subject, str) or not 1 <= len(subject) <= 100:
+            raise HTTPException(403, "no authorized role")
+        return Actor(subject, max(allowed, key=lambda r: ROLE_LEVEL[r]))

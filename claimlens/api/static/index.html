@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ClaimLens | Review desk</title>
+  <link rel="stylesheet" href="/review/style.css">
+  <script src="/review/app.js" defer></script>
+</head>
+<body>
+  <header><div><span class="eyebrow">CLAIMLENS / HUMAN IN THE LOOP</span><h1>Review desk</h1></div><span class="badge">Synthetic data only</span></header>
+  <main>
+    <section class="connection" aria-label="API connection">
+      <label for="token">Bearer token (or OIDC ID token)</label>
+      <div class="row"><input id="token" type="password" autocomplete="off" placeholder="Kept in memory only">
+        <button id="connect" type="button">Connect</button><button id="disconnect" class="secondary" type="button">Disconnect</button></div>
+      <p>Auth-disabled local demos can leave this blank. Never paste real patient data.</p>
+    </section>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <div class="workspace">
+      <section class="queue">
+        <div class="row"><h2>Pending decisions</h2><button id="refresh" class="secondary" type="button">Refresh</button></div>
+        <label for="status">Status</label><select id="status"><option value="needs_review">Needs review</option><option value="rejected">Rejected</option></select>
+        <ul id="documents" aria-label="Review queue"></ul><button id="more" class="secondary" hidden type="button">Next page</button>
+      </section>
+      <section class="detail">
+        <h2 id="detail-title">Select a document</h2>
+        <p id="metadata">Corrections become evaluation answer keys. Invalid data cannot be approved.</p>
+        <ul id="findings"></ul>
+        <form id="review-form" hidden>
+          <div id="fields" class="fields"></div>
+          <label for="note">Review note (required to reject)</label><textarea id="note" maxlength="1000" rows="3"></textarea>
+          <div class="row actions"><button id="approve" type="submit">Approve with corrections</button>
+            <button id="reject" type="button" class="danger">Reject</button></div>
+        </form>
+      </section>
+    </div>
+  </main>
+  <footer>Audited access. Version-checked decisions. No browser storage.</footer>
+</body>
+</html>

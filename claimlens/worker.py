@@ -76,7 +76,9 @@ class _Heartbeat:
             try:
                 sqs.change_message_visibility(QueueUrl=queue_url, ReceiptHandle=receipt, VisibilityTimeout=visibility)
             except (ClientError, BotoCoreError) as exc:
-                log.warning("heartbeat failed (%s)", exc.__class__.__name__)  # message may be redelivered: that is safe
+                log.warning("heartbeat failed (%s)", exc.__class__.__name__,
+                            extra={"event": "heartbeat_failed", "fields": {"operation": "heartbeat",
+                                                                         "error_class": exc.__class__.__name__}})
 
 
 class Worker:
@@ -103,16 +105,18 @@ class Worker:
         if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(sig, lambda *_: self.stop())
-        log.info("worker started: concurrency=%d visibility=%ds", self.concurrency, self.visibility)
+        log.info("worker started: concurrency=%d visibility=%ds", self.concurrency, self.visibility,
+                 extra={"event": "worker_started", "fields": {"concurrency": self.concurrency}})
         while not self._stop.is_set():
             try:
                 self.run_once()
             except (ClientError, BotoCoreError) as exc:
-                log.error("queue error (%s); backing off", exc.__class__.__name__)
+                log.error("queue error (%s); backing off", exc.__class__.__name__,
+                          extra={"event": "queue_error", "fields": {"error_class": exc.__class__.__name__}})
                 self._stop.wait(5)
             self._touch_liveness()
         self._pool.shutdown(wait=True)
-        log.info("worker stopped cleanly after %d message(s)", self.processed)
+        log.info("worker stopped cleanly after %d message(s)", self.processed, extra={"event": "worker_stopped"})
 
     @staticmethod
     def _touch_liveness() -> None:
@@ -139,7 +143,8 @@ class Worker:
             with _Heartbeat(self.sqs, self.queue_url, receipt, self.visibility, self.heartbeat_seconds):
                 outcome = self._process(msg, receives)
         except Exception as exc:  # never let one bad message kill the worker
-            log.error("message=%s unexpected %s; will retry", mid, exc.__class__.__name__)
+            log.error("message=%s unexpected %s; will retry", mid, exc.__class__.__name__,
+                      extra={"event": "message_retry", "fields": {"error_class": exc.__class__.__name__}})
             outcome = Outcome(False, "unexpected_error", backoff_seconds(receives))
         try:
             if outcome.delete:
@@ -148,9 +153,13 @@ class Worker:
                 self.sqs.change_message_visibility(QueueUrl=self.queue_url, ReceiptHandle=receipt,
                                                    VisibilityTimeout=outcome.retry_delay)
         except (ClientError, BotoCoreError) as exc:
-            log.error("message=%s could not %s (%s)", mid, "delete" if outcome.delete else "requeue", exc.__class__.__name__)
+            log.error("message=%s could not %s (%s)", mid, "delete" if outcome.delete else "requeue", exc.__class__.__name__,
+                      extra={"event": "queue_ack_failed", "fields": {"error_class": exc.__class__.__name__,
+                                                                  "operation": "delete" if outcome.delete else "requeue"}})
         log.info("message=%s outcome=%s delete=%s receives=%d ms=%d", mid, outcome.reason, outcome.delete, receives,
-                 int((time.monotonic() - started) * 1000))
+                 int((time.monotonic() - started) * 1000),
+                 extra={"event": "message_finished", "fields": {"outcome": outcome.reason, "receives": receives,
+                                                               "elapsed_ms": int((time.monotonic() - started) * 1000)}})
 
     # ---- the actual work ----------------------------------------------------------------------------------
     def _process(self, msg: dict, receives: int) -> Outcome:
@@ -215,11 +224,15 @@ class Worker:
             tags = [{"Key": "claimlens-status", "Value": tag}] + ([{"Key": "claimlens-document", "Value": document_id}] if document_id else [])
             self.s3.put_object_tagging(Bucket=bucket, Key=key, Tagging={"TagSet": tags})
         except (ClientError, BotoCoreError) as exc:
-            log.warning("could not tag object (%s)", exc.__class__.__name__)
+            log.warning("could not tag object (%s)", exc.__class__.__name__,
+                        extra={"event": "bookkeeping_failed", "fields": {"operation": "tag",
+                                                                        "error_class": exc.__class__.__name__}})
         if upload_id:
             try:
                 with self._sf() as s:
                     repo.mark_upload(s, upload_id, state, document_id, error)
                     s.commit()
             except Exception as exc:
-                log.warning("could not update upload status (%s)", exc.__class__.__name__)
+                log.warning("could not update upload status (%s)", exc.__class__.__name__,
+                            extra={"event": "bookkeeping_failed", "fields": {"operation": "upload_status",
+                                                                            "error_class": exc.__class__.__name__}})

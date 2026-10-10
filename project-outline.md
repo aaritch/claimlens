@@ -1,5 +1,9 @@
 # ClaimLens: HIPAA-Style Document Intake Pipeline on AWS Bedrock
 
+> Roadmap note: Phases 0–8 now have local reference implementations. See `docs/architecture.md` and
+> `docs/phases-6-8.md` for the implemented contracts and remaining operational requirements.
+> Live AWS/Salesforce deployments, compliance verification and optional alternative orchestration are not implied.
+
 A portfolio project designed to mirror the GDIT "AI/ML Document Processing Developer" (CMS) job description, component by component.
 
 ---

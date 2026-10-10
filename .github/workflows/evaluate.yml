@@ -1,0 +1,36 @@
+name: Real Bedrock evaluation (manual, billed)
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  evaluate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: model-evaluation
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_EVAL_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Synthetic held-out evaluation with real model
+        env:
+          CLAIMLENS_MODEL_ID: ${{ vars.CLAIMLENS_MODEL_ID }}
+        run: |
+          python -m claimlens gen-data --out data/ci --count 60 --seed 29 --difficulty hard
+          python -m claimlens eval --data data/ci --config "label=bedrock-ci,llm=bedrock" --min-f1 0.90 --min-auto-accept-precision 0.99 --min-error-catch-rate 0.95
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: synthetic-bedrock-evaluation
+          path: results/eval/
+          retention-days: 7

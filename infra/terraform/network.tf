@@ -45,6 +45,7 @@ resource "aws_vpc_endpoint" "s3" {
   service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
+  policy            = data.aws_iam_policy_document.s3_endpoint.json
 
   tags = { Name = "${local.name}-s3" }
 }
@@ -54,6 +55,7 @@ resource "aws_vpc_endpoint" "dynamodb" {
   service_name      = "com.amazonaws.${var.aws_region}.dynamodb"
   vpc_endpoint_type = "Gateway"
   route_table_ids   = [aws_route_table.private.id]
+  policy            = data.aws_iam_policy_document.dynamodb_endpoint.json
 
   tags = { Name = "${local.name}-dynamodb" }
 }

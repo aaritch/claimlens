@@ -1,0 +1,93 @@
+name: Approved AWS deployment
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+jobs:
+  checks:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+  evaluate:
+    needs: checks
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/evaluate.yml
+  plan:
+    needs: [checks, evaluate]
+    runs-on: ubuntu-latest
+    environment: aws-plan
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Write non-secret Terraform configuration
+        env:
+          TF_BACKEND: ${{ vars.TF_BACKEND_HCL }}
+          TF_VARS: ${{ vars.TF_VARS_JSON }}
+        run: |
+          test -n "$TF_BACKEND" && test -n "$TF_VARS"
+          printf '%s' "$TF_BACKEND" > infra/terraform/backend.tf
+          printf '%s' "$TF_VARS" > infra/terraform/ci.tfvars.json
+      - run: terraform -chdir=infra/terraform init -input=false
+      - name: Preview release (no plan artifact, state can contain secrets)
+        run: terraform -chdir=infra/terraform plan -input=false -var-file=ci.tfvars.json -var=enable_services=true -var="image_tag=${GITHUB_SHA}"
+  deploy:
+    needs: plan
+    runs-on: ubuntu-latest
+    # Configure required reviewers and main-only branch protection on this environment before use.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Write non-secret Terraform configuration
+        env:
+          TF_BACKEND: ${{ vars.TF_BACKEND_HCL }}
+          TF_VARS: ${{ vars.TF_VARS_JSON }}
+        run: |
+          test -n "$TF_BACKEND" && test -n "$TF_VARS"
+          printf '%s' "$TF_BACKEND" > infra/terraform/backend.tf
+          printf '%s' "$TF_VARS" > infra/terraform/ci.tfvars.json
+      - run: terraform -chdir=infra/terraform init -input=false
+      - name: Build, scan and publish the approved SHA
+        run: |
+          set -euo pipefail
+          repo="$(terraform -chdir=infra/terraform output -raw ecr_repository_url)"
+          docker build --platform linux/amd64 -t "$repo:$GITHUB_SHA" .
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,noexec,size=128m -e PYTHONPATH=/app -e CLAIMLENS_DATABASE_URL=sqlite:////tmp/smoke.db -e CLAIMLENS_LLM=mock:careful -v "$PWD/scripts/container_smoke.py:/smoke.py:ro" --entrypoint python "$repo:$GITHUB_SHA" /smoke.py
+          docker save "$repo:$GITHUB_SHA" -o /tmp/claimlens-image.tar
+          docker run --rm -v /tmp:/scan:ro aquasec/trivy:0.65.0 image --input /scan/claimlens-image.tar --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+          if ! aws ecr describe-images --repository-name "${repo#*/}" --image-ids "imageTag=$GITHUB_SHA" >/dev/null 2>&1; then
+            docker push "$repo:$GITHUB_SHA"
+          fi
+      - name: Apply approved release
+        run: |
+          terraform -chdir=infra/terraform plan -input=false -var-file=ci.tfvars.json -var=enable_services=true -var="image_tag=${GITHUB_SHA}" -out=release.tfplan
+          terraform -chdir=infra/terraform apply -input=false release.tfplan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install boto3
+      - name: Migrate and wait for healthy services
+        run: python scripts/finish_deployment.py --terraform-dir infra/terraform

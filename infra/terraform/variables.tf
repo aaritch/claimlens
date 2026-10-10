@@ -281,3 +281,45 @@ variable "api_desired_count" {
   type        = number
   default     = 2
 }
+
+variable "audit_retention_days" {
+  description = "CloudTrail object retention. Align with the approved audit policy before production."
+  type        = number
+  default     = 365
+}
+
+variable "cost_per_document_alarm_usd" {
+  description = "Alarm when average attempted-processing cost per document exceeds this placeholder threshold."
+  type        = number
+  default     = 0.05
+}
+
+variable "enable_analytics" {
+  description = "Provision the optional encrypted Parquet bucket, Glue table, and Athena workgroup."
+  type        = bool
+  default     = false
+}
+
+variable "analytics_retention_days" {
+  description = "Retention for synthetic analytics snapshots and Athena query results."
+  type        = number
+  default     = 30
+}
+
+variable "oidc_issuer" {
+  description = "Optional HTTPS OIDC issuer. Configure reachable private JWKS networking before enabling."
+  type        = string
+  default     = ""
+}
+
+variable "oidc_audience" {
+  description = "Audience of accepted OIDC ID tokens."
+  type        = string
+  default     = ""
+}
+
+variable "oidc_jwks_url" {
+  description = "Pinned HTTPS JWKS URL for the OIDC issuer; must be reachable from private API tasks."
+  type        = string
+  default     = ""
+}
