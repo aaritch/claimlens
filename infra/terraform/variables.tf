@@ -19,6 +19,16 @@ variable "aws_region" {
   default     = "us-east-1"
 }
 
+variable "allowed_account_ids" {
+  description = "Optional expected AWS account IDs. Deployment configs should set this to prevent wrong-account applies."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for account_id in var.allowed_account_ids : can(regex("^[0-9]{12}$", account_id))])
+    error_message = "Each allowed_account_ids entry must be a 12-digit AWS account ID."
+  }
+}
+
 variable "extra_tags" {
   description = "Additional tags applied to every resource."
   type        = map(string)

@@ -91,7 +91,8 @@ file -> parser router -> ParsedDocument -> classify (LLM) -> extract (LLM) -> ru
 ## 6. Implementation status
 Phases 0–5 provide parsing, extraction, evaluation, OCR, storage and the event-driven AWS stack.
 Phases 6–8 add security controls, delivery workflows, monitoring, analytics and the human review UI.
-These are a synthetic-data reference implementation, not a claim of HIPAA compliance or a verified live deployment.
+These are a synthetic-data reference implementation, not a claim of HIPAA compliance or production readiness.
+Development AWS infrastructure was provisioned and checked on October 10, 2026; worker/API activation remains deferred.
 
 ---
 
@@ -363,8 +364,9 @@ browser --GET /uploads/{id}--> processed | duplicate | failed  --> GET /document
 | `claimlens/worker.py` | SQS consumer: concurrency, visibility **heartbeat**, backoff tied to receive count, graceful SIGTERM, no keys in logs |
 | `Dockerfile`, `.dockerignore` | one image, non-root, read-only-friendly; command picks `worker` or `serve` |
 | `infra/terraform/` | the whole stack (flat root module, one file per concern, 100+ resources) |
+| `infra/state-bootstrap/` | separately managed private, versioned, KMS-encrypted Terraform state bucket |
 | `scripts/deploy.sh` | `bootstrap` -> `release` (git-SHA tag) -> `migrate`; refuses to ship uncommitted code |
-| `tests/infra/` | 44 policy-as-code tests over the parsed HCL |
+| `tests/infra/` | policy-as-code tests over application and state-bootstrap HCL |
 | `tests/test_worker.py` | 45 worker tests incl. real boto3 S3+SQS (moto) and a poison message reaching the DLQ |
 
 ## Design decisions worth being able to defend
@@ -380,22 +382,35 @@ browser --GET /uploads/{id}--> processed | duplicate | failed  --> GET /document
 - **Two-phase rollout.** The ECR repo must exist before an image can be pushed and services need an image, so `enable_services` starts false.
 
 ## Deploy
+Use Terraform **1.10+** (CI uses **1.16.5**) for S3-native state locking. Provision state storage with
+[`infra/state-bootstrap/README.md`](infra/state-bootstrap/README.md), then keep backend settings in a protected
+private file. Set `allowed_account_ids` in both the backend settings and deployment variables before planning.
+
 ```bash
-cp infra/terraform/envs/dev.tfvars.example infra/terraform/envs/dev.tfvars   # edit: AZs, Bedrock model + ARNs
-cp infra/terraform/backend.tf.example infra/terraform/backend.tf             # remote state bucket (create it separately)
+cp infra/terraform/envs/dev.tfvars.example infra/terraform/envs/dev.tfvars   # edit: account, AZs, approved model ARNs
+cp infra/terraform/backend.tf.example infra/terraform/backend.tf
+# Copy backend.hcl.example to a protected location, fill it using state-bootstrap outputs, then:
+terraform -chdir=infra/terraform init -backend-config=/absolute/private/path/backend.hcl
 ./scripts/deploy.sh bootstrap     # everything except the services
+# Stop here for an infrastructure-only deployment; the following commands require separate release approval.
 ./scripts/deploy.sh release       # build + push :<git-sha>, then enable the services
 ./scripts/deploy.sh migrate       # create database tables (once)
-# API (optional): set enable_api=true, api_certificate_arn, api_allowed_cidrs, then
-aws secretsmanager put-secret-value --secret-id "$(terraform -chdir=infra/terraform output -raw api_tokens_secret_arn)" \
-  --secret-string 'TOKEN1:rita:reader,TOKEN2:rob:reviewer'
 ```
 
+The optional private API additionally requires an issued ACM certificate, allowed client CIDRs and actual
+network connectivity. Configure bearer tokens through an approved Secrets Manager workflow, not command-line
+arguments, or configure OIDC with reachable private JWKS networking. See [`docs/operations.md`](docs/operations.md).
+
 ## READ THIS: what was and was NOT verified
-Terraform provider initialization (`-backend=false`) and schema validation now succeed locally.
-The Terraform has **not been planned or applied against AWS**. Live IAM, KMS, EventBridge, CloudTrail,
-identity-provider networking, and service behavior still require the first-deploy checks.
-The delivery workflows are added to the repository, but have not been installed or run on GitHub or Jenkins.
+On October 10, 2026, the development infrastructure was planned and applied against AWS:
+**9 state-bootstrap and 102 application Terraform additions**, no updates or deletions.
+PostgreSQL and Redis were available, all 11 VPC endpoints were available, CloudTrail delivered logs,
+and remote state used versioned SSE-KMS storage with locking. The final application plan reported **no changes**.
+
+Worker, API and analytics remain disabled. No application image was published to ECR and no migration task
+was run. Upload-to-queue delivery, live Bedrock/Textract processing, identity-provider networking and
+end-to-end application behavior still need the activation checks. Hosted deployment/model-evaluation workflows
+and account-specific GitHub OIDC roles have not been configured or verified.
 
 Historical Phase 5 checks (scanner counts below were not re-run for Phases 6–8):
 - `tofu fmt` clean; all files parse (python-hcl2); every `resource.name`, `var.x`, `local.x` reference resolves to something declared (a typo-catcher standing in for `validate`).
@@ -417,12 +432,15 @@ Historical Phase 5 checks (scanner counts below were not re-run for Phases 6–8
 ### Known gaps (honest list)
 - **Secret rotation** is not configured (Redis token, API tokens). The RDS-managed password does rotate if you enable it. Needs a rotation function and a rollout plan.
 - The app connects as the **database master user**. Production should use a least-privilege app user (or IAM database auth, already enabled on the instance).
-- **One KMS key** for everything. Per-service keys are a valid hardening step.
+- **One application-data KMS key**, plus a separate Terraform-state key. Per-service data keys are a valid hardening step.
 - S3/DynamoDB gateway endpoint policies are now scoped. Interface endpoint policies and WAF remain production hardening tasks.
   There is no public exposure path (deliberate).
 - CI/CD workflows, a dashboard, application alarms and Alembic migrations are now present.
   Required reviewers, OIDC trust, environment variables and live service tests must be configured by an operator.
 - Single region, no cross-region replication or disaster-recovery plan (a deliberate decision to make, not a default).
 - `original_retention_days` (30) is a **policy placeholder**: set it to your real retention requirement.
-- **Cost:** the nine interface endpoints bill hourly per AZ; at the published us-east-1 rate that is on the order of $130/month before any traffic (verify in the AWS pricing calculator). RDS, ElastiCache and always-on Fargate are on top. Use `deletion_protection=false` / `force_destroy=true` and `terraform destroy` for throwaway stacks, and set an AWS Budget first.
+- **Cost:** nine interface endpoints across two AZs cost about $131/month at the checked us-east-1 hourly rate.
+  The infrastructure-only development configuration totals roughly **$210/month plus usage and taxes**;
+  Fargate/API activation adds more. An estimate or Budget alert is not a spending cap. Set a Budget and alert recipient.
+  Teardown requires separate approval, deliberate changes to deletion guards, and a plan for versioned data and backups.
 - Tesseract throughput per Fargate vCPU is unmeasured; size `worker_cpu`/`worker_max_capacity` from a real load test, and mind Bedrock/Textract rate limits when raising the ceiling.

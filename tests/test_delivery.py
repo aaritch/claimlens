@@ -88,3 +88,21 @@ def test_real_model_eval_is_manual_and_uses_a_separate_seed():
     assert config["jobs"]["evaluate"]["environment"] == "model-evaluation"
     text = (ROOT / ".github/workflows/evaluate.yml").read_text()
     assert "--seed 29" in text and "llm=bedrock" in text
+
+
+def test_infrastructure_checks_cover_bootstrap_and_support_s3_locking():
+    infrastructure = workflow("ci.yml")["jobs"]["infrastructure"]
+    steps = infrastructure["steps"]
+    setup = next(step for step in steps if step.get("uses") == "hashicorp/setup-terraform@v3")
+    assert setup["with"]["terraform_version"] == "1.16.5"
+    commands = "\n".join(step.get("run", "") for step in steps)
+    for root in ("infra/terraform", "infra/state-bootstrap"):
+        assert f"terraform -chdir={root} fmt -check" in commands
+        assert f"terraform -chdir={root} init -backend=false -input=false" in commands
+        assert f"terraform -chdir={root} validate" in commands
+    for job in ("plan", "deploy"):
+        setup = next(
+            step for step in workflow("deploy.yml")["jobs"][job]["steps"]
+            if step.get("uses") == "hashicorp/setup-terraform@v3"
+        )
+        assert setup["with"]["terraform_version"] == "1.16.5"

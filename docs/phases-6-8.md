@@ -69,20 +69,22 @@ Use expand/contract, backward-compatible migrations while old workers are still 
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | PR, main push, manual, reusable call | Lint, selected-module type checks, tests/80% coverage, offline evaluation gate, Terraform validation, Docker/Trivy scan. |
+| `ci.yml` | PR, main push, manual, reusable call | Lint, selected-module type checks, tests/80% coverage, offline evaluation gate, application/state-bootstrap Terraform validation, Docker/Trivy scan. |
 | `deploy.yml` | Manual, main only | Re-run CI and require protected real-model evaluation, then read-only plan, approved production deployment via OIDC, git-SHA image, schema migration, ECS stability and rollback detection. |
 | `evaluate.yml` | Manual or reusable deployment call, main only | Separate environment-approved, billed Bedrock evaluation on synthetic held-out data. |
 | `Jenkinsfile` | Operator-configured | Equivalent local checks, evaluation, infrastructure validation, build and scan. It does not provision Jenkins or embed AWS credentials. |
 
 Before enabling deployment:
 
-1. Bootstrap the stack with services disabled so the ECR repository exists.
+1. Use Terraform 1.10+ (CI pins 1.16.5), provision state storage with `infra/state-bootstrap`,
+   then bootstrap the application with services disabled so the ECR repository exists.
 2. Create GitHub environments `aws-plan`, `production`, and `model-evaluation`.
 3. Require reviewers and main-only branch restrictions for production and model evaluation.
 4. Configure short-lived AWS OIDC roles. Pin trust to your repository and each exact environment subject.
    Do not grant deployment privileges to pull-request subjects.
 5. Set environment variables `AWS_REGION`, `AWS_PLAN_ROLE_ARN` / `AWS_DEPLOY_ROLE_ARN` / `AWS_EVAL_ROLE_ARN`,
-   `TF_BACKEND_HCL` (the complete non-secret backend block), `TF_VARS_JSON` (non-secret Terraform inputs),
+   `TF_BACKEND_HCL` (a complete non-secret S3 backend block, not the partial local declaration),
+   `TF_VARS_JSON` (non-secret Terraform inputs, including the expected `allowed_account_ids`),
    and `CLAIMLENS_MODEL_ID` in model evaluation.
 6. Protect Terraform state with encryption, access controls and locking. Never upload binary plans/state as artifacts.
 7. Configure alert subscriptions, replace placeholder prices, and set an AWS Budget.
@@ -179,7 +181,23 @@ Live credentials, org setup and remote smoke tests are operator responsibilities
 - Linux/amd64 production image built; runtime-only, non-root/read-only/no-network smoke tests passed on Python 3.12.
 - Trivy 0.65.0 found **zero fixable HIGH/CRITICAL findings** using `--severity HIGH,CRITICAL --ignore-unfixed`.
   This is not a claim that lower-severity/unfixed vulnerabilities are absent.
-- AWS plan/apply, live service permissions, hosted workflows, live OIDC and Salesforce writes were not run.
+- These application/image checks were offline; live model/OCR, hosted deployments, OIDC and Salesforce writes were not run.
 
 Dependency deprecation and older test-fixture SQLite cleanup warnings remain non-failing. The image and local
-validation artifacts are available locally; nothing was pushed or deployed.
+validation artifacts remain local and are not committed.
+
+## Infrastructure-only AWS validation, October 10, 2026
+
+The approved development deployment created **9 state-bootstrap and 102 application Terraform entries**.
+It verified private/encrypted storage and queues, an active encrypted DynamoDB table, available PostgreSQL
+and Redis with TLS/auth, nine private interface endpoints across two subnets plus two gateway endpoints,
+CloudTrail logging/delivery, and versioned KMS-encrypted remote state with S3-native locking.
+
+AWS reports PostgreSQL 16's already-enabled `rds.force_ssl` system default with a `pending-reboot` apply method.
+Terraform now matches that metadata while keeping the value at `1`; the database was in sync and was not rebooted.
+The final application plan reported **no changes**.
+
+Worker/API/analytics remain disabled. ECR has no published application image; migrations and end-to-end
+application tests have not run. API certificate/network/auth choices and the approved real-model quality gate
+must be resolved before a later activation. Account-specific inputs, backend settings, state and saved plans
+are excluded from Git; no deployment credentials belong in the repository.

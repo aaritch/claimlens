@@ -1,0 +1,9 @@
+# Replace placeholders in a protected private copy. Never add credentials to this file.
+# Use state-bootstrap's outputs, including the full key ARN rather than its alias.
+bucket              = "YOUR-TERRAFORM-STATE-BUCKET"
+key                 = "claimlens/dev/terraform.tfstate"
+region              = "us-east-1"
+encrypt             = true
+kms_key_id          = "arn:aws:kms:us-east-1:YOUR_ACCOUNT_ID:key/YOUR_STATE_KEY_ID"
+use_lockfile        = true
+allowed_account_ids = ["YOUR_ACCOUNT_ID"]

@@ -1,14 +1,7 @@
-# Copy to backend.tf and fill in. State contains secrets (the Redis auth token), so the state bucket must be
-# private, versioned and KMS-encrypted, and only the deploy role may read it. Create it OUTSIDE this stack.
-#
-# Terraform >= 1.10 can lock with S3 alone (use_lockfile = true). Older versions need a DynamoDB lock table.
+# Copy this declaration to backend.tf (git-ignored). Put environment-specific settings from backend.hcl.example
+# in a protected private file and pass its absolute path to terraform init -backend-config=<path>.
+# State contains the Redis auth token. Use the separate infra/state-bootstrap root for private, versioned,
+# KMS-encrypted state storage, and restrict state access to approved deployment principals.
 terraform {
-  backend "s3" {
-    bucket       = "YOUR-TERRAFORM-STATE-BUCKET"
-    key          = "claimlens/dev/terraform.tfstate"
-    region       = "us-east-1"
-    encrypt      = true
-    kms_key_id   = "alias/YOUR-STATE-KEY"
-    use_lockfile = true
-  }
+  backend "s3" {}
 }

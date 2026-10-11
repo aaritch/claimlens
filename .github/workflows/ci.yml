@@ -54,10 +54,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "1.9.8"
+          terraform_version: "1.16.5"
       - run: terraform -chdir=infra/terraform fmt -check -recursive
       - run: terraform -chdir=infra/terraform init -backend=false -input=false
       - run: terraform -chdir=infra/terraform validate
+      - run: terraform -chdir=infra/state-bootstrap fmt -check
+      - run: terraform -chdir=infra/state-bootstrap init -backend=false -input=false
+      - run: terraform -chdir=infra/state-bootstrap validate
   image:
     runs-on: ubuntu-latest
     steps:

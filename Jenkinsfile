@@ -24,6 +24,9 @@ pipeline {
                 sh 'terraform -chdir=infra/terraform fmt -check -recursive'
                 sh 'terraform -chdir=infra/terraform init -backend=false -input=false'
                 sh 'terraform -chdir=infra/terraform validate'
+                sh 'terraform -chdir=infra/state-bootstrap fmt -check'
+                sh 'terraform -chdir=infra/state-bootstrap init -backend=false -input=false'
+                sh 'terraform -chdir=infra/state-bootstrap validate'
             }
         }
         stage('Build and scan') {

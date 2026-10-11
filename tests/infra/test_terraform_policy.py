@@ -73,6 +73,14 @@ def stmt_effect(st):
 
 
 # ---- 1. syntax and references -------------------------------------------------------------------------------
+def test_provider_can_restrict_deployment_to_expected_accounts(tf):
+    provider = next(entry["aws"] for entry in tf["raw"]["provider"] if "aws" in entry)
+    assert attr(provider, "allowed_account_ids") == "${var.allowed_account_ids}"
+    guard = tf["variables"]["allowed_account_ids"]
+    assert attr(guard, "default") == []
+    assert "^[0-9]{12}$" in attr(guard["validation"][0], "condition")
+
+
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
 def test_every_file_parses(path):
     assert parse(path) is not None
@@ -230,7 +238,12 @@ def test_database_is_private_encrypted_tls_only_and_has_no_password_in_code(tf):
     assert "password" not in db, "the master password must be RDS-managed, never in code or state"
     assert attr(db, "iam_database_authentication_enabled") is True and attr(db, "deletion_protection") == "${var.deletion_protection}"
     params = tf["resources"]["aws_db_parameter_group"]["postgres"]["parameter"]
-    assert any(attr(p, "name") == "rds.force_ssl" and attr(p, "value") == "1" for p in params)
+    assert any(
+        attr(p, "name") == "rds.force_ssl"
+        and attr(p, "value") == "1"
+        and attr(p, "apply_method") == "pending-reboot"
+        for p in params
+    )
 
 
 def test_redis_encrypts_at_rest_and_in_transit_and_requires_auth(tf):

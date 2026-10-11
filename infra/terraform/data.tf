@@ -62,8 +62,9 @@ resource "aws_db_parameter_group" "postgres" {
   description = "Require TLS and log connections"
 
   parameter {
-    name  = "rds.force_ssl"
-    value = "1"
+    name         = "rds.force_ssl"
+    value        = "1"
+    apply_method = "pending-reboot" # Match PostgreSQL 16's enabled system default to avoid perpetual drift.
   }
 
   parameter {

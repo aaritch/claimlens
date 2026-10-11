@@ -8,4 +8,5 @@ crash.log
 *.tfvars.json
 !*.tfvars.example
 backend.tf
+backend*.hcl
 .terraform.lock.hcl.bak

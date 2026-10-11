@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = ">= 1.10.0" # S3-native state locking requires Terraform 1.10 or newer.
 
   required_providers {
     aws = {
@@ -14,7 +14,8 @@ terraform {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = var.allowed_account_ids
 
   default_tags {
     tags = local.tags
